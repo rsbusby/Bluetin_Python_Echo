@@ -23,6 +23,7 @@
 # Python 2 & 3 print function compatibility
 from __future__ import print_function
 
+import asyncio
 from time import time
 from time import monotonic
 from time import sleep
@@ -132,6 +133,29 @@ class Echo(object):
             else:
                 return 0
 
+    async def read_async(self, unit = 'cm', samples = 1):
+        if samples < 2: # Take one sensor reading
+            echoTime = await self._read_async()
+            return self._valueToUnit(echoTime, unit)
+        
+        # Take more than one sensor reads to get an average result.
+        samplesTotal = 0
+        goodSamples = 0
+        if samples > 1:
+            for sample in range(0, samples):
+                echoResult = await self._read_async()
+                if echoResult > 0:
+                    samplesTotal = samplesTotal + echoResult
+                    goodSamples = goodSamples + 1
+                    
+                await asyncio.sleep(self._sensor_rest) # Rest the sensor
+
+            if goodSamples > 0:
+                # Return the average of all the samples made.
+                return  self._valueToUnit((samplesTotal / goodSamples), unit)
+            else:
+                return 0
+            
     """
     Activate the sensor and return a new echo period.
     """
@@ -179,6 +203,50 @@ class Echo(object):
         # Return reading
         return echoTime
 
+    async def _read_async(self):
+        # Check if enough time has passed before triggering device.
+        if (monotonic() - self._last_read_time) > self._sensor_rest:
+            # Reset values
+            timeout = False
+            echoStart = 0.0
+            echoStop = 0.0
+            # Trigger 10us pulse
+            GPIO.output(self._trigger_pin, True)
+            await asyncio.sleep(0.00001)
+            GPIO.output(self._trigger_pin, False)
+            echoTimeout = self._maxDistanceTime + self._maxDistTimeOffset
+            self._last_read_time = monotonic()
+            # Get most recent time before pin rises.
+            while GPIO.input(self._echo_pin) == 0:
+                echoStart = monotonic()
+                if (monotonic() - self._last_read_time) > self._triggerTimeout:
+                    timeout = True
+                    break
+
+            # Get most recent time before pin falls.
+            while GPIO.input(self._echo_pin) == 1:
+                echoStop = monotonic()
+                if (monotonic() - self._last_read_time) > echoTimeout:
+                    timeout = True
+                    break
+
+            if timeout == True:
+                # No object was detected
+                echoTime = 0
+                self._errorCode = OUT_OF_RANGE
+            else:
+                # Calculate pulse length.
+                echoTime = echoStop - echoStart
+                self._errorCode = GOOD
+
+        else:
+            # Device not rested enough, use last value.
+            echoTime = 0
+            self._errorCode = NOT_READY
+        
+        # Return reading
+        return echoTime
+    
     """
     Convert echo time to distance unit of measure.
     """
